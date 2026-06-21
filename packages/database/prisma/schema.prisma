@@ -1,0 +1,377 @@
+// Solana Copy Trader — database schema (vault execution architecture).
+// All token base-unit amounts are stored as strings to avoid BigInt precision loss.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum VaultStatus {
+  ACTIVE
+  PAUSED
+  REVOKED
+}
+
+enum VaultTxKind {
+  CREATE
+  DEPOSIT
+  WITHDRAW
+  UPDATE_LIMITS
+  PAUSE
+  RESUME
+  REVOKE
+}
+
+enum VaultTxStatus {
+  PENDING
+  CONFIRMED
+  FAILED
+}
+
+enum TraderStatus {
+  ACTIVE
+  PAUSED
+  BANNED
+  INACTIVE
+}
+
+enum CopyMode {
+  FIXED
+  PROPORTIONAL
+}
+
+enum Dex {
+  JUPITER
+  RAYDIUM
+  ORCA
+  METEORA
+  UNKNOWN
+}
+
+enum CopyTradeStatus {
+  PENDING
+  SUBMITTED
+  CONFIRMED
+  FAILED
+  SKIPPED
+}
+
+enum NotificationChannel {
+  TELEGRAM
+  DISCORD
+  EMAIL
+  WEBHOOK
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+model User {
+  id        String   @id @default(cuid())
+  email     String?  @unique
+  createdAt DateTime @default(now())
+
+  wallets                 ConnectedWallet[]
+  vaults                  Vault[]
+  copyRelations           CopyRelation[]
+  copyTrades              CopyTrade[]
+  notificationPreferences NotificationPreference[]
+  auditLogs               AuditLog[]
+
+  @@map("users")
+}
+
+model ConnectedWallet {
+  id        String   @id @default(cuid())
+  publicKey String   @unique
+  userId    String
+  isDefault Boolean  @default(false)
+  label     String?
+  createdAt DateTime @default(now())
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vaults Vault[]
+
+  @@index([userId])
+  @@map("connected_wallets")
+}
+
+// ---------------------------------------------------------------------------
+// Vault — the non-custodial funding source
+// ---------------------------------------------------------------------------
+
+model Vault {
+  id             String      @id @default(cuid())
+  userId         String
+  walletId       String
+  vaultPda       String      @unique
+  ownerPubkey    String
+  executorPubkey String
+  status         VaultStatus @default(ACTIVE)
+
+  // Cached on-chain state (source of truth is the chain; synced by vault-service).
+  onChainBalanceLamports String   @default("0")
+  lastSyncedAt           DateTime @default(now())
+
+  // Mirrors the limits enforced on-chain.
+  maxTradeSizeSol  Float
+  maxDailyLossSol  Float
+  maxSlippageBps   Int
+  maxOpenPositions Int
+  allowedDexs      Dex[]
+  tokenBlacklist   String[]
+
+  createdSignature String?
+  createdAt        DateTime @default(now())
+
+  user          User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  wallet        ConnectedWallet     @relation(fields: [walletId], references: [id])
+  copyRelations CopyRelation[]
+  copyTrades    CopyTrade[]
+  transactions  VaultTransaction[]
+  analytics     VaultAnalytics[]
+
+  @@index([userId])
+  @@index([status])
+  @@map("vaults")
+}
+
+model VaultTransaction {
+  id          String        @id @default(cuid())
+  vaultId     String
+  kind        VaultTxKind
+  amountSol   Float?
+  signature   String        @unique
+  status      VaultTxStatus @default(PENDING)
+  createdAt   DateTime      @default(now())
+  confirmedAt DateTime?
+
+  vault Vault @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+
+  @@index([vaultId])
+  @@index([kind])
+  @@map("vault_transactions")
+}
+
+// ---------------------------------------------------------------------------
+// Traders & their on-chain trades
+// ---------------------------------------------------------------------------
+
+model Trader {
+  id            String       @id @default(cuid())
+  walletAddress String       @unique
+  label         String?
+  status        TraderStatus @default(ACTIVE)
+
+  // Cached analytics (recomputed by the analytics cron).
+  roi7d        Float     @default(0)
+  roi30d       Float     @default(0)
+  winRate      Float     @default(0)
+  sharpeRatio  Float     @default(0)
+  maxDrawdown  Float     @default(0)
+  avgHoldTime  Int       @default(0)
+  totalTrades  Int       @default(0)
+  lastTradeAt  DateTime?
+
+  createdAt DateTime @default(now())
+
+  trades        Trade[]
+  copyRelations CopyRelation[]
+  analytics     TraderAnalytics[]
+
+  @@index([status])
+  @@map("traders")
+}
+
+model Trade {
+  id             String   @id @default(cuid())
+  traderId       String
+  signature      String   @unique
+  slot           BigInt
+  timestamp      DateTime
+  tokenIn        String
+  tokenOut       String
+  amountIn       String
+  amountOut      String
+  dex            Dex      @default(UNKNOWN)
+  priceImpactBps Int      @default(0)
+  feeSol         String   @default("0")
+  createdAt      DateTime @default(now())
+
+  trader     Trader      @relation(fields: [traderId], references: [id], onDelete: Cascade)
+  copyTrades CopyTrade[]
+
+  @@index([traderId])
+  @@index([timestamp])
+  @@map("trades")
+}
+
+// ---------------------------------------------------------------------------
+// Copy relations & resulting copy trades
+// ---------------------------------------------------------------------------
+
+model CopyRelation {
+  id               String   @id @default(cuid())
+  userId           String
+  vaultId          String
+  traderId         String
+  enabled          Boolean  @default(true)
+  copyMode         CopyMode @default(FIXED)
+  fixedAmountSol   Float?
+  proportionPct    Float?
+  maxTradeSizeSol  Float
+  maxSlippageBps   Int
+  stopLossPct      Float?
+  takeProfitPct    Float?
+  maxDailyLossSol  Float?
+  maxOpenPositions Int?
+  tokenBlacklist   String[]
+  pausedAt         DateTime?
+  pauseReason      String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vault  Vault  @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  trader Trader @relation(fields: [traderId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, traderId])
+  @@index([traderId, enabled])
+  @@index([vaultId])
+  @@map("copy_relations")
+}
+
+model CopyTrade {
+  id                 String          @id @default(cuid())
+  userId             String
+  vaultId            String
+  originalTradeId    String
+  status             CopyTradeStatus @default(PENDING)
+  copiedSignature    String?         @unique
+  amountIn           String?
+  amountOut          String?
+  executionLatencyMs Int?
+  pnlSol             Float?
+  pnlUsd             Float?
+  skipReason         String?
+  errorMessage       String?
+  jitoBundleId       String?
+  createdAt          DateTime        @default(now())
+  settledAt          DateTime?
+
+  user          User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vault         Vault @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+  originalTrade Trade @relation(fields: [originalTradeId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([vaultId])
+  @@index([status])
+  @@index([originalTradeId])
+  @@map("copy_trades")
+}
+
+// ---------------------------------------------------------------------------
+// Analytics
+// ---------------------------------------------------------------------------
+
+model TraderAnalytics {
+  id             String   @id @default(cuid())
+  traderId       String
+  calculatedAt   DateTime @default(now())
+  windowDays     Int
+  roi            Float    @default(0)
+  winRate        Float    @default(0)
+  totalTrades    Int      @default(0)
+  avgHoldTimeSec Int      @default(0)
+  sharpeRatio    Float    @default(0)
+  maxDrawdown    Float    @default(0)
+  realizedPnlSol Float    @default(0)
+
+  trader Trader @relation(fields: [traderId], references: [id], onDelete: Cascade)
+
+  @@unique([traderId, windowDays])
+  @@index([traderId])
+  @@map("trader_analytics")
+}
+
+model VaultAnalytics {
+  id               String   @id @default(cuid())
+  vaultId          String
+  calculatedAt     DateTime @default(now())
+  windowDays       Int
+  realizedPnlSol   Float    @default(0)
+  unrealizedPnlSol Float    @default(0)
+  winRate          Float    @default(0)
+  openPositions    Int      @default(0)
+  depositedSol     Float    @default(0)
+  withdrawnSol     Float    @default(0)
+  netFlowSol       Float    @default(0)
+
+  vault Vault @relation(fields: [vaultId], references: [id], onDelete: Cascade)
+
+  @@unique([vaultId, windowDays])
+  @@index([vaultId])
+  @@map("vault_analytics")
+}
+
+// ---------------------------------------------------------------------------
+// Notifications, audit, token metadata
+// ---------------------------------------------------------------------------
+
+model NotificationPreference {
+  id                  String              @id @default(cuid())
+  userId              String
+  channel             NotificationChannel
+  target              String
+  enabled             Boolean             @default(true)
+  onTradeExecuted     Boolean             @default(true)
+  onTradeFailed       Boolean             @default(true)
+  onDailyLoss         Boolean             @default(true)
+  onTraderPaused      Boolean             @default(true)
+  onVaultLowBalance   Boolean             @default(true)
+  onPermissionRevoked Boolean             @default(true)
+  createdAt           DateTime            @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, channel])
+  @@index([userId])
+  @@map("notification_preferences")
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  action    String
+  metadata  Json?
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([action])
+  @@map("audit_logs")
+}
+
+model TokenMetadata {
+  mintAddress String   @id
+  symbol      String?
+  name        String?
+  decimals    Int      @default(9)
+  logoUri     String?
+  verified    Boolean  @default(false)
+  isHoneypot  Boolean  @default(false)
+  updatedAt   DateTime @updatedAt @default(now())
+
+  @@map("token_metadata")
+}

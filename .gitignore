@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+.pnp.*
+.yarn/*
+
+# Build output
+dist/
+build/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# Env files (never commit secrets)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Prisma
+packages/database/prisma/*.db
+packages/database/prisma/migrations/dev.db*
+
+# Solana / Anchor
+solana-program/target/
+solana-program/.anchor/
+solana-program/test-ledger/
+**/*.so
+
+# Secrets / keypairs
+*.pem
+executor-keypair*.json
+id.json

@@ -1,0 +1,195 @@
+# Local development stack for Solana Copy Trader.
+#
+# Phase status: infra (postgres, redis, solana-validator), the one-shot migrate
+# job, and monitoring (prometheus, grafana) are runnable now. The application
+# service blocks are wired up here and become buildable as each phase lands its
+# source code and Dockerfile usage (api-gateway = phase 3, pipeline = phase 4,
+# analytics/notification = phase 5, frontend = phase 6).
+#
+# Quick start for just the infra you need during early phases:
+#   docker compose up -d postgres redis
+#   docker compose run --rm migrate
+
+x-common-env: &common-env
+  NODE_ENV: ${NODE_ENV:-development}
+  DATABASE_URL: ${DATABASE_URL:-postgresql://sct:sct_password@postgres:5432/sct?schema=public}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+  JWT_SECRET: ${JWT_SECRET}
+  JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+  HELIUS_API_KEY: ${HELIUS_API_KEY}
+  HELIUS_RPC_URL: ${HELIUS_RPC_URL}
+  HELIUS_WS_URL: ${HELIUS_WS_URL}
+  SOLANA_RPC_URL: ${SOLANA_RPC_URL:-http://solana-validator:8899}
+  VAULT_PROGRAM_ID: ${VAULT_PROGRAM_ID}
+  EXECUTOR_AUTHORITY_KEY: ${EXECUTOR_AUTHORITY_KEY}
+  JITO_BLOCK_ENGINE_URL: ${JITO_BLOCK_ENGINE_URL:-https://mainnet.block-engine.jito.wtf}
+  JITO_AUTH_TOKEN: ${JITO_AUTH_TOKEN}
+  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+  DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL}
+  SENDGRID_API_KEY: ${SENDGRID_API_KEY}
+  SENDGRID_FROM_EMAIL: ${SENDGRID_FROM_EMAIL}
+  CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
+  PAPER_TRADING: ${PAPER_TRADING:-true}
+
+x-service-base: &service-base
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  env_file:
+    - .env
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sct
+      POSTGRES_PASSWORD: sct_password
+      POSTGRES_DB: sct
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U sct -d sct']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Local Solana validator with the vault program deployed (see solana-program/, phase 2).
+  solana-validator:
+    image: solanalabs/solana:v1.18.26
+    restart: unless-stopped
+    command: >
+      solana-test-validator
+      --rpc-port 8899
+      --ledger /ledger
+      --reset
+    ports:
+      - '8899:8899'
+      - '8900:8900'
+    volumes:
+      - solana-ledger:/ledger
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -sf http://localhost:8899/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # One-shot: apply migrations then exit.
+  migrate:
+    build:
+      context: .
+      dockerfile: packages/database/Dockerfile
+    environment:
+      <<: *common-env
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+
+  # ----- Application services (built from the generic Dockerfile) ----------
+  api-gateway:
+    <<: *service-base
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE: api-gateway
+    environment:
+      <<: *common-env
+      PORT: '3001'
+    ports:
+      - '3001:3001'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  wallet-monitor:
+    <<: *service-base
+    build: { context: ., dockerfile: Dockerfile, args: { SERVICE: wallet-monitor } }
+    environment: { <<: *common-env }
+
+  tx-parser:
+    <<: *service-base
+    build: { context: ., dockerfile: Dockerfile, args: { SERVICE: tx-parser } }
+    environment: { <<: *common-env }
+
+  copy-engine:
+    <<: *service-base
+    build: { context: ., dockerfile: Dockerfile, args: { SERVICE: copy-engine } }
+    environment: { <<: *common-env }
+
+  execution:
+    <<: *service-base
+    build: { context: ., dockerfile: Dockerfile, args: { SERVICE: execution } }
+    environment: { <<: *common-env }
+
+  vault-service:
+    <<: *service-base
+    build: { context: ., dockerfile: Dockerfile, args: { SERVICE: vault-service } }
+    environment: { <<: *common-env }
+
+  analytics:
+    <<: *service-base
+    build: { context: ., dockerfile: Dockerfile, args: { SERVICE: analytics } }
+    environment: { <<: *common-env }
+
+  notification:
+    <<: *service-base
+    build: { context: ., dockerfile: Dockerfile, args: { SERVICE: notification } }
+    environment: { <<: *common-env }
+
+  # ----- Monitoring --------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    restart: unless-stopped
+    ports:
+      - '9090:9090'
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    restart: unless-stopped
+    ports:
+      - '3002:3000'
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+
+volumes:
+  postgres-data:
+  redis-data:
+  solana-ledger:
+  prometheus-data:
+  grafana-data:

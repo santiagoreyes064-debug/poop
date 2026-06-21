@@ -1,0 +1,2 @@
+# Application services are added in later phases (api-gateway, wallet-monitor,
+# tx-parser, copy-engine, execution, vault-service, analytics, notification, frontend).

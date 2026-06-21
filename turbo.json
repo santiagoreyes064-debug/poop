@@ -1,0 +1,43 @@
+{
+  "globalEnv": [
+    "NODE_ENV",
+    "DATABASE_URL",
+    "REDIS_URL",
+    "JWT_SECRET",
+    "HELIUS_API_KEY",
+    "JITO_BLOCK_ENGINE_URL",
+    "JITO_AUTH_TOKEN",
+    "SOLANA_RPC_URL",
+    "VAULT_PROGRAM_ID",
+    "EXECUTOR_AUTHORITY_KEY",
+    "TELEGRAM_BOT_TOKEN",
+    "DISCORD_WEBHOOK_URL",
+    "SENDGRID_API_KEY",
+    "CORS_ORIGIN",
+    "PORT",
+    "PAPER_TRADING"
+  ],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "lint": {
+      "dependsOn": ["^build"]
+    },
+    "typecheck": {
+      "dependsOn": ["^build"]
+    },
+    "test": {
+      "dependsOn": ["^build"],
+      "outputs": ["coverage/**"]
+    },
+    "clean": {
+      "cache": false
+    }
+  }
+}
